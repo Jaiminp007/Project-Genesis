@@ -52,6 +52,172 @@ Instead of trying to remove knowledge, we **start small and build knowledge thro
 
 ---
 
+## ⚠️ Critical Design Fixes (Lessons Learned)
+
+Before diving into the architecture, here are three critical design decisions that prevent common failure modes:
+
+### Fix #1: Asynchronous "Sleep" Learning (The Latency Solution)
+
+**The Problem:** If we stop the simulation every time an agent discovers something to retrain (10+ minutes), the simulation is paused 90% of the time. Two agents discovering 5 things a day = constant interruption.
+
+**The Solution:** Mimic biological sleep cycles.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    DAY/NIGHT LEARNING CYCLE                  │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ☀️ DAY PHASE (Inference Only)                               │
+│  ├── Agents run on CURRENT model weights                    │
+│  ├── All experiences collected into buffer                   │
+│  ├── No training, no interruption                           │
+│  └── Simulation runs at full speed                          │
+│                                                              │
+│  🌙 NIGHT PHASE (Training)                                   │
+│  ├── Simulation enters "Night" cycle                        │
+│  ├── Agents "sleep" (minimal activity)                      │
+│  ├── GPU runs training job on buffered experiences          │
+│  └── Model weights updated asynchronously                   │
+│                                                              │
+│  🌅 MORNING (Hot-Swap)                                       │
+│  ├── New LoRA adapters loaded (hot-swapped)                 │
+│  ├── Agents "wake up" smarter                               │
+│  └── Day phase resumes                                      │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why This Works:**
+- Mimics biological sleep (we dream to consolidate memories)
+- No simulation interruption during "awake" hours
+- Training happens in parallel, not sequentially
+- Agents literally need to sleep to learn
+
+### Fix #2: LoRA Adapters (The Forgetting Solution)
+
+**The Problem:** Neural networks suffer from "catastrophic forgetting." If an agent learns "Fire = Hot," retraining might overwrite neurons that understood "Water = Wet" or even "How to walk."
+
+**The Solution:** Don't retrain the whole model. Use LoRA (Low-Rank Adaptation).
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    LoRA ADAPTER SYSTEM                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  BASE MODEL (1B parameters) - FROZEN, NEVER CHANGES         │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Core reasoning, physics, basic logic               │    │
+│  │  This is your "hardware" - stable foundation        │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                          │                                   │
+│                          ▼                                   │
+│  LoRA ADAPTERS (~10MB each) - TRAINABLE                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │   Survival   │  │    Social    │  │  Discovery   │       │
+│  │   Adapter    │  │   Adapter    │  │   Adapter    │       │
+│  │              │  │              │  │              │       │
+│  │ • Food/water │  │ • Signals    │  │ • Fire       │       │
+│  │ • Hazards    │  │ • Cooperation│  │ • Tools      │       │
+│  │ • Navigation │  │ • Trust      │  │ • Patterns   │       │
+│  └──────────────┘  └──────────────┘  └──────────────┘       │
+│         │                  │                  │              │
+│         └──────────────────┴──────────────────┘              │
+│                          │                                   │
+│                          ▼                                   │
+│              DYNAMIC ADAPTER SWITCHING                       │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ Context Detection → Load Relevant Adapter(s)        │    │
+│  │ • Alone + hungry → Survival Adapter                 │    │
+│  │ • Near other agent → Social Adapter                 │    │
+│  │ • Novel observation → Discovery Adapter             │    │
+│  │ • Can combine: Social + Discovery for cooperation   │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why This Works:**
+- Base model stays frozen (no forgetting core abilities)
+- LoRA adapters are tiny (~10MB vs 2GB+ for full model)
+- Training is 10x faster
+- Can swap adapters based on context
+- Failed experiments don't corrupt the base model
+
+### Fix #3: The "Lizard Brain" (The Paralysis Solution)
+
+**The Problem:** A 1B model trained only on physics textbooks might be catatonic. It won't have the executive function to say "I should move north." It might just hallucinate physics equations.
+
+**The Solution:** Dual-process architecture (System 1 + System 2).
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 DUAL-PROCESS ARCHITECTURE                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  🦎 SYSTEM 1: LIZARD BRAIN (Hardcoded Python)               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  ALWAYS RUNNING - Basic survival instincts          │    │
+│  │                                                     │    │
+│  │  if hunger > 80:                                    │    │
+│  │      move_toward_food() or move_randomly()          │    │
+│  │  if thirst > 80:                                    │    │
+│  │      move_toward_water() or move_randomly()         │    │
+│  │  if health < 20:                                    │    │
+│  │      flee_danger()                                  │    │
+│  │  if touched_harmful_object:                         │    │
+│  │      move_away_immediately()                        │    │
+│  │                                                     │    │
+│  │  🟢 GREEN LIGHT = Lizard Brain in control           │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                          │                                   │
+│                          ▼                                   │
+│              ACTIVATION THRESHOLD CHECK                      │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Lizard Brain gets "stuck" OR observes something    │    │
+│  │  novel/complex?                                     │    │
+│  │                                                     │    │
+│  │  Triggers:                                          │    │
+│  │  • Unknown object detected                          │    │
+│  │  • Other agent present                              │    │
+│  │  • Multiple options available                       │    │
+│  │  • Lizard Brain action failed 3+ times             │    │
+│  │  • Received signal from other agent                 │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                          │                                   │
+│                          ▼                                   │
+│  🧠 SYSTEM 2: LLM REASONING (The Thinker)                   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  ACTIVATED ON DEMAND - Complex reasoning            │    │
+│  │                                                     │    │
+│  │  • Analyze novel situations                         │    │
+│  │  • Plan multi-step actions                          │    │
+│  │  • Interpret signals from other agents              │    │
+│  │  • Decide whether to cooperate                      │    │
+│  │  • Form hypotheses about the world                  │    │
+│  │  • Creative problem-solving                         │    │
+│  │                                                     │    │
+│  │  🔵 BLUE LIGHT = LLM Reasoning active               │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                                                              │
+│  VISUALIZATION:                                              │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Agent A: [🟢] Moving toward food (instinct)        │    │
+│  │  Agent B: [🔵] Analyzing unknown object (reasoning) │    │
+│  │  Agent A: [🔵] Other agent nearby, evaluating...    │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why This Works:**
+- Agents never freeze or become catatonic
+- Basic survival is guaranteed (they won't starve while "thinking")
+- LLM only used when actually needed (saves compute)
+- Clear visualization of what's driving behavior
+- Mimics human cognition (intuition vs. deliberation)
+
+---
+
 ## 🏗️ System Architecture
 
 ### Overview
@@ -66,18 +232,21 @@ Instead of trying to remove knowledge, we **start small and build knowledge thro
 │  │  - Hunger    │                                │  - Hunger    │ │
 │  │  - Thirst    │                                │  - Thirst    │ │
 │  │  - Memory    │                                │  - Memory    │ │
+│  │  - 🦎/🧠 Mode │                                │  - 🦎/🧠 Mode │ │
 │  └──────┬───────┘                                └───────┬──────┘ │
 │         │                                                 │        │
 │         │            WORLD (50x50 Grid)                  │        │
 │         │         - Food sources                         │        │
 │         │         - Water sources                        │        │
 │         │         - Environmental hazards                │        │
+│         │         - Day/Night cycle ☀️🌙                  │        │
 │         └─────────────────┬───────────────────────────── ┘        │
 └───────────────────────────┼──────────────────────────────────────┘
                             │
                     ┌───────▼────────┐
                     │  EXPERIENCES   │
                     │   COLLECTED    │
+                    │   (DAYTIME)    │
                     └───────┬────────┘
                             │
                     ┌───────▼────────┐
@@ -88,7 +257,7 @@ Instead of trying to remove knowledge, we **start small and build knowledge thro
                 ┌───────────┴───────────┐
                 │                       │
           SIGNIFICANT              ROUTINE
-          (Store & Retrain)        (Buffer Only)
+          (Queue for Night)        (Buffer Only)
                 │                       │
         ┌───────▼────────┐      ┌──────▼──────┐
         │ CORE KNOWLEDGE │      │   RECENT    │
@@ -99,14 +268,22 @@ Instead of trying to remove knowledge, we **start small and build knowledge thro
                 └──────────┬───────────┘
                            │
                     ┌──────▼───────┐
-                    │  INCREMENTAL │
-                    │  RETRAINING  │
-                    │  (5-20 min)  │
+                    │   🌙 NIGHT   │
+                    │    PHASE     │
+                    │  (Training)  │
                     └──────┬───────┘
                            │
                     ┌──────▼───────┐
-                    │   UPDATED    │
-                    │  AGENT MODEL │
+                    │     LoRA     │
+                    │   ADAPTER    │
+                    │   TRAINING   │
+                    │  (5-15 min)  │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │  🌅 MORNING  │
+                    │  HOT-SWAP    │
+                    │   ADAPTERS   │
                     └──────────────┘
 ```
 
@@ -118,6 +295,7 @@ Instead of trying to remove knowledge, we **start small and build knowledge thro
 
 **Specifications:**
 - **Size:** 100M - 1B parameters (intentionally small)
+- **Status:** FROZEN after initial training (never retrained)
 - **Training Data:** Heavily filtered dataset containing ONLY:
   - Basic physics (gravity, motion, thermodynamics)
   - Causality and logic (if-then reasoning)
@@ -134,7 +312,391 @@ Instead of trying to remove knowledge, we **start small and build knowledge thro
 
 **Training Time:** 1-2 weeks on high-end GPU
 
-### 2. The Simulation Environment
+### 2. The LoRA Adapter System
+
+```python
+class LoRAAdapterManager:
+    """
+    Manages lightweight adapters that add learned knowledge
+    without modifying the base model
+    """
+    
+    def __init__(self, base_model):
+        self.base_model = base_model  # FROZEN
+        
+        # Initialize adapter categories
+        self.adapters = {
+            'survival': LoRAAdapter(rank=16, alpha=32),
+            'social': LoRAAdapter(rank=16, alpha=32),
+            'discovery': LoRAAdapter(rank=16, alpha=32),
+            'communication': LoRAAdapter(rank=8, alpha=16),
+        }
+        
+        # Track which adapters are active
+        self.active_adapters = []
+        
+    def select_adapters(self, context):
+        """
+        Dynamically select which adapters to use based on context
+        """
+        selected = []
+        
+        # Survival adapter: when hungry, thirsty, or in danger
+        if context.hunger > 50 or context.thirst > 50 or context.health < 50:
+            selected.append('survival')
+            
+        # Social adapter: when other agents nearby
+        if context.other_agents_visible:
+            selected.append('social')
+            
+        # Communication adapter: when signals received
+        if context.signals_received:
+            selected.append('communication')
+            
+        # Discovery adapter: when novel objects detected
+        if context.novel_observations:
+            selected.append('discovery')
+            
+        self.active_adapters = selected
+        return selected
+        
+    def forward(self, input_ids, context):
+        """
+        Run inference with selected adapters merged
+        """
+        # Select relevant adapters
+        selected = self.select_adapters(context)
+        
+        # Merge selected adapters with base model
+        merged_model = self.merge_adapters(selected)
+        
+        # Run inference
+        return merged_model.generate(input_ids)
+        
+    def train_adapter(self, adapter_name, experiences):
+        """
+        Train a specific adapter on new experiences
+        Called during NIGHT phase only
+        """
+        adapter = self.adapters[adapter_name]
+        
+        # Format experiences as training data
+        training_data = self.format_experiences(experiences)
+        
+        # Train only the adapter (base model frozen)
+        adapter.train(
+            data=training_data,
+            epochs=3,
+            learning_rate=1e-4,
+            # LoRA-specific params
+            lora_dropout=0.1
+        )
+        
+        return adapter
+```
+
+### 3. The Lizard Brain (System 1)
+
+```python
+class LizardBrain:
+    """
+    Hardcoded survival instincts - always running, no LLM needed
+    Ensures agents never freeze or become catatonic
+    """
+    
+    def __init__(self, agent):
+        self.agent = agent
+        self.active = True  # Always on
+        self.stuck_counter = 0
+        self.last_position = None
+        
+    def evaluate(self, observation):
+        """
+        Check if lizard brain can handle the situation
+        Returns: (can_handle: bool, action: str or None, reason: str)
+        """
+        state = observation.own_state
+        
+        # CRITICAL SURVIVAL - Highest priority
+        if state['health'] < 20:
+            return True, 'flee_danger', '🦎 CRITICAL: Health low, fleeing'
+            
+        # IMMEDIATE NEEDS - High priority
+        if state['hunger'] > 80:
+            if observation.food_visible:
+                return True, f'move_toward_{observation.nearest_food}', '🦎 Hungry, food visible'
+            else:
+                return True, 'move_randomly', '🦎 Hungry, searching for food'
+                
+        if state['thirst'] > 80:
+            if observation.water_visible:
+                return True, f'move_toward_{observation.nearest_water}', '🦎 Thirsty, water visible'
+            else:
+                return True, 'move_randomly', '🦎 Thirsty, searching for water'
+        
+        # PAIN RESPONSE - Immediate
+        if observation.touched_harmful:
+            return True, 'move_away', '🦎 Pain! Moving away'
+            
+        # MODERATE NEEDS - Lower priority
+        if state['hunger'] > 50 and observation.food_visible:
+            return True, f'move_toward_{observation.nearest_food}', '🦎 Somewhat hungry, food nearby'
+            
+        if state['thirst'] > 50 and observation.water_visible:
+            return True, f'move_toward_{observation.nearest_water}', '🦎 Somewhat thirsty, water nearby'
+            
+        # STUCK DETECTION
+        if self.is_stuck():
+            self.stuck_counter += 1
+            if self.stuck_counter > 3:
+                # Lizard brain failed, need higher reasoning
+                return False, None, '🦎 Stuck! Escalating to System 2'
+                
+        # NO URGENT NEEDS - Pass to System 2 for exploration/reasoning
+        return False, None, '🦎 No urgent needs'
+        
+    def is_stuck(self):
+        """Detect if agent is stuck (same position, failed actions)"""
+        current_pos = self.agent.position
+        if self.last_position == current_pos:
+            return True
+        self.last_position = current_pos
+        self.stuck_counter = 0
+        return False
+        
+    def execute(self, action):
+        """Execute a lizard brain action"""
+        # Direct execution, no reasoning
+        return self.agent.perform_action(action)
+```
+
+### 4. The Dual-Process Agent
+
+```python
+class DualProcessAgent:
+    """
+    Agent with both Lizard Brain (System 1) and LLM (System 2)
+    """
+    
+    def __init__(self, agent_id):
+        self.agent_id = agent_id
+        
+        # Dual-process systems
+        self.lizard_brain = LizardBrain(self)  # System 1
+        self.llm_reasoner = None  # System 2 (loaded with adapters)
+        
+        # LoRA adapter manager
+        self.adapter_manager = LoRAAdapterManager(base_model)
+        
+        # State
+        self.position = (0, 0)
+        self.state = {'hunger': 50, 'thirst': 50, 'health': 100}
+        
+        # Experience tracking
+        self.experience_buffer = []
+        self.core_knowledge = []
+        
+        # Visualization
+        self.current_mode = '🦎'  # or '🧠'
+        
+    def decide(self, observation):
+        """
+        Main decision loop - Lizard Brain first, then LLM if needed
+        """
+        # STEP 1: Try Lizard Brain first
+        can_handle, action, reason = self.lizard_brain.evaluate(observation)
+        
+        if can_handle:
+            self.current_mode = '🟢'  # Green = Lizard Brain
+            return action, reason
+            
+        # STEP 2: Lizard Brain can't handle - activate LLM
+        self.current_mode = '🔵'  # Blue = LLM Reasoning
+        
+        # Check for LLM triggers
+        if self.should_activate_llm(observation):
+            return self.llm_decide(observation)
+            
+        # STEP 3: Default to exploration
+        self.current_mode = '🟢'
+        return 'explore', '🦎 Nothing urgent, exploring'
+        
+    def should_activate_llm(self, observation):
+        """Determine if LLM reasoning is needed"""
+        triggers = [
+            observation.unknown_objects,      # Novel observation
+            observation.other_agents_visible,  # Social situation
+            observation.signals_received,      # Communication received
+            observation.complex_choice,        # Multiple valid options
+            self.lizard_brain.stuck_counter > 3  # Lizard brain failed
+        ]
+        return any(triggers)
+        
+    def llm_decide(self, observation):
+        """Use LLM (System 2) for complex reasoning"""
+        # Select appropriate adapters
+        context = self.build_context(observation)
+        
+        # Format prompt with recent experiences
+        prompt = self.format_prompt(
+            observation=observation,
+            recent_memory=self.experience_buffer[-5:],
+            core_knowledge=self.core_knowledge
+        )
+        
+        # Run inference with merged adapters
+        response = self.adapter_manager.forward(prompt, context)
+        
+        # Parse action from response
+        action, reasoning = self.parse_response(response)
+        
+        return action, f'🧠 {reasoning}'
+        
+    def experience(self, situation, action, outcome):
+        """Process what happened"""
+        exp = Experience(
+            situation=situation,
+            action=action,
+            outcome=outcome,
+            reward=self.calculate_reward(outcome),
+            timestamp=current_sim_time,
+            mode=self.current_mode  # Track which system made decision
+        )
+        
+        self.experience_buffer.append(exp)
+        
+        # Significance evaluation (for night training)
+        if self.is_significant(exp):
+            self.core_knowledge.append(exp)
+            
+        return exp
+```
+
+### 5. The Day/Night Cycle Manager
+
+```python
+class DayNightCycleManager:
+    """
+    Manages the simulation's day/night cycle
+    Training only happens at night
+    """
+    
+    def __init__(self, simulation):
+        self.simulation = simulation
+        self.current_phase = 'day'
+        self.day_length = 100  # sim-steps
+        self.night_length = 20  # sim-steps (agents sleep)
+        self.current_time = 0
+        
+        # Training queue
+        self.training_queue = []
+        self.training_in_progress = False
+        
+    def tick(self):
+        """Advance simulation time"""
+        self.current_time += 1
+        
+        # Check for phase transition
+        cycle_position = self.current_time % (self.day_length + self.night_length)
+        
+        if cycle_position < self.day_length:
+            if self.current_phase != 'day':
+                self.transition_to_day()
+        else:
+            if self.current_phase != 'night':
+                self.transition_to_night()
+                
+    def transition_to_night(self):
+        """☀️ → 🌙 Begin night phase"""
+        self.current_phase = 'night'
+        print("🌙 NIGHT PHASE - Agents sleeping, training beginning...")
+        
+        # Put agents to sleep
+        for agent in self.simulation.agents:
+            agent.sleep()
+            
+        # Start asynchronous training
+        self.start_training()
+        
+    def transition_to_day(self):
+        """🌙 → ☀️ Begin day phase"""
+        self.current_phase = 'day'
+        print("☀️ DAY PHASE - Agents waking up...")
+        
+        # Hot-swap new adapters if training completed
+        if self.training_completed:
+            self.hot_swap_adapters()
+            
+        # Wake agents
+        for agent in self.simulation.agents:
+            agent.wake()
+            
+    def start_training(self):
+        """Begin background training job"""
+        # Collect all significant experiences from all agents
+        all_experiences = []
+        for agent in self.simulation.agents:
+            all_experiences.extend(agent.get_training_experiences())
+            
+        if not all_experiences:
+            print("  No new experiences to train on")
+            return
+            
+        # Categorize experiences by adapter type
+        categorized = self.categorize_experiences(all_experiences)
+        
+        # Train each relevant adapter
+        for adapter_name, experiences in categorized.items():
+            if experiences:
+                print(f"  Training {adapter_name} adapter on {len(experiences)} experiences...")
+                self.train_adapter_async(adapter_name, experiences)
+                
+    def categorize_experiences(self, experiences):
+        """Sort experiences into adapter categories"""
+        categorized = {
+            'survival': [],
+            'social': [],
+            'discovery': [],
+            'communication': []
+        }
+        
+        for exp in experiences:
+            # Categorize based on experience type
+            if exp.involves_resource or exp.involves_danger:
+                categorized['survival'].append(exp)
+            if exp.involves_other_agent:
+                categorized['social'].append(exp)
+            if exp.is_novel_discovery:
+                categorized['discovery'].append(exp)
+            if exp.involves_signal:
+                categorized['communication'].append(exp)
+                
+        return categorized
+        
+    def train_adapter_async(self, adapter_name, experiences):
+        """Train adapter in background thread"""
+        import threading
+        
+        def training_job():
+            self.training_in_progress = True
+            # Train the specific adapter
+            for agent in self.simulation.agents:
+                agent.adapter_manager.train_adapter(adapter_name, experiences)
+            self.training_in_progress = False
+            self.training_completed = True
+            
+        thread = threading.Thread(target=training_job)
+        thread.start()
+        
+    def hot_swap_adapters(self):
+        """Load newly trained adapters into agents"""
+        print("  🔄 Hot-swapping trained adapters...")
+        for agent in self.simulation.agents:
+            agent.adapter_manager.reload_adapters()
+        self.training_completed = False
+```
+
+### 6. The Simulation Environment
 
 **World Structure:**
 ```python
@@ -148,7 +710,7 @@ class World:
     # Environmental factors
     temperature = variable
     weather = dynamic
-    day_night_cycle = 24_sim_hours
+    day_night_cycle = DayNightCycleManager(self)  # NEW
     
     # Hazards
     dangerous_areas = []
@@ -175,101 +737,13 @@ class AgentObservation:
         'position': (x, y)
     }
     received_signals = []   # Communication from other agents
+    
+    # NEW: For Lizard Brain / LLM decision
+    unknown_objects = []     # Triggers LLM
+    complex_choice = False   # Multiple valid options
 ```
 
-### 3. Agent Architecture
-
-```python
-class ContinuouslyLearningAgent:
-    def __init__(self):
-        # The reasoning engine (LLM)
-        self.model = TinyLanguageModel(
-            size="500M",
-            trained_on="filtered_physics_dataset"
-        )
-        
-        # Experience management
-        self.core_knowledge = []      # Significant learnings
-        self.recent_buffer = []       # Last 20-30 experiences
-        self.new_experiences = []     # Since last retrain
-        
-        # Decision-making components
-        self.action_space = [
-            'move_north', 'move_south', 'move_east', 'move_west',
-            'take_item', 'drop_item', 'use_item',
-            'emit_signal', 'rest'
-        ]
-        
-        # Communication (starts blank)
-        self.signal_vocabulary = ['🔴', '🔵', '🟢', '🟡', '🟣']
-        self.signal_meanings = {}  # Learned through experience
-        
-    def perceive(self, world_state):
-        """Process what the agent observes"""
-        return self.model.process_observation(world_state)
-        
-    def decide(self, observation):
-        """Use model to choose action"""
-        # Generate reasoning
-        thought_process = self.model.reason(
-            observation=observation,
-            memory=self.recent_buffer[-5:],  # Recent context
-            knowledge=self.core_knowledge     # What it's learned
-        )
-        
-        # Choose action
-        action = self.model.select_action(
-            options=self.action_space,
-            reasoning=thought_process
-        )
-        
-        return action, thought_process
-        
-    def experience(self, situation, action, outcome):
-        """Process what happened"""
-        # Create experience record
-        exp = Experience(
-            situation=situation,
-            action=action,
-            outcome=outcome,
-            reward=self.calculate_reward(outcome),
-            timestamp=current_sim_time
-        )
-        
-        # Add to buffer
-        self.new_experiences.append(exp)
-        self.recent_buffer.append(exp)
-        
-        # Check if significant
-        if self.is_significant(exp):
-            self.core_knowledge.append(exp)
-            print(f"💡 Significant learning: {exp.summary}")
-            
-        # Check if should retrain
-        if self.should_retrain():
-            self.retrain()
-            
-    def retrain(self):
-        """Incremental model retraining on experiences"""
-        # Prepare training data
-        training_data = self.format_experiences_as_text(
-            core=self.core_knowledge,
-            recent=self.recent_buffer[-20:]
-        )
-        
-        # Small incremental training
-        self.model.train(
-            data=training_data,
-            epochs=3,
-            learning_rate=1e-4,
-            batch_size=8
-        )
-        
-        # Clear new experiences buffer
-        self.new_experiences = []
-```
-
-### 4. The Significance Filter (Critical Component)
+### 7. The Significance Filter (Critical Component)
 
 **This is what prevents the dataset from growing exponentially.**
 
@@ -284,7 +758,7 @@ class SignificanceEvaluator:
     PATTERN_CONFIRM = 30      # 3rd occurrence of pattern
     ROUTINE = 0               # Boring, repeated action
     
-    RETRAIN_THRESHOLD = 5     # Retrain after N significant experiences
+    RETRAIN_THRESHOLD = 5     # Queue for night training after N significant experiences
     
     def __init__(self):
         self.known_patterns = set()
@@ -356,7 +830,7 @@ Experience {
     reward: +30
 }
 Significance: 100 (first discovery) + 50 (high impact) = 150
-Action: ✅ STORE IN CORE KNOWLEDGE, RETRAIN
+Action: ✅ QUEUE FOR NIGHT TRAINING
 
 # SCENARIO 2: Walking Around (ROUTINE)
 Experience {
@@ -366,7 +840,7 @@ Experience {
     reward: 0
 }
 Significance: 0 (routine)
-Action: ❌ BUFFER ONLY, DON'T RETRAIN
+Action: ❌ BUFFER ONLY
 
 # SCENARIO 3: Fire Burns (BELIEF UPDATE)
 Experience {
@@ -378,7 +852,7 @@ Experience {
 Previous belief: "fire is pleasant" (from observing at distance)
 New belief: "fire causes damage on contact"
 Significance: 100 (belief update) + 50 (high impact) = 150
-Action: ✅ STORE IN CORE KNOWLEDGE, RETRAIN
+Action: ✅ QUEUE FOR NIGHT TRAINING
 
 # SCENARIO 4: Cooperation Pattern Emerges
 Experience {
@@ -389,10 +863,10 @@ Experience {
 }
 Count: 3rd time this pattern occurred
 Significance: 30 (pattern confirmed)
-Action: ✅ STORE IN CORE KNOWLEDGE, RETRAIN
+Action: ✅ QUEUE FOR NIGHT TRAINING → Social Adapter
 ```
 
-### 5. Communication System
+### 8. Communication System
 
 **Agents start with NO shared language. Communication emerges through use.**
 
@@ -475,7 +949,7 @@ Week 25+: Abstract Concepts
 - Property emerges: [🔴, self_gesture] = "my food"
 ```
 
-### 6. Experience Formatting for Training
+### 9. Experience Formatting for Training
 
 **Converting experiences into training data:**
 
@@ -483,12 +957,15 @@ Week 25+: Abstract Concepts
 def format_experience_as_training_text(experience):
     """
     Transform simulation experience into natural language
-    for model retraining
+    for LoRA adapter training
     """
     
     text = f"""
 OBSERVATION:
 {describe_observation(experience.situation)}
+
+SYSTEM MODE:
+{experience.mode}  # 🟢 Lizard Brain or 🔵 LLM
 
 REASONING:
 {experience.thought_process}
@@ -502,6 +979,9 @@ OUTCOME:
 LEARNING:
 {extract_causal_relationship(experience)}
 
+ADAPTER CATEGORY:
+{categorize_for_adapter(experience)}
+
 SIGNIFICANCE:
 {experience.significance_score}
 """
@@ -514,6 +994,9 @@ SIGNIFICANCE:
 OBSERVATION:
 Agent observed dry wooden sticks on ground. Temperature: warm. 
 Other materials present: leaves, small branches.
+
+SYSTEM MODE:
+🔵 LLM (novel object detected)
 
 REASONING:
 Sticks could potentially be useful. Testing physical properties.
@@ -536,6 +1019,8 @@ combustion (fire). Fire is a sustained chemical reaction that produces
 heat and light. Optimal distance from fire: close enough for warmth, 
 far enough to avoid damage.
 
+ADAPTER CATEGORY: discovery
+
 SIGNIFICANCE: 150 (First discovery + High impact)
 """
 ```
@@ -547,18 +1032,18 @@ SIGNIFICANCE: 150 (First discovery + High impact)
 ### The Core Problem
 After 1000 simulation days, agents might have 10,000+ experiences. Retraining on all of them would take days.
 
-### The Solution: Selective Memory
+### The Solution: Selective Memory + LoRA
 
 ```python
 class MemoryManagement:
     """
-    Keeps only what matters, discards routine experiences
+    Keeps only what matters, trains only relevant adapters
     """
     
     def __init__(self):
         self.core_knowledge = []     # Max ~200 experiences
         self.recent_buffer = []       # Last ~30 experiences
-        self.retrain_counter = 0
+        self.night_training_queue = []  # Queued for tonight
         
     def add_experience(self, exp):
         """Process incoming experience"""
@@ -574,7 +1059,7 @@ class MemoryManagement:
         # Only add to core if significant
         if sig_score >= SIGNIFICANCE_THRESHOLD:
             self.core_knowledge.append(exp)
-            self.retrain_counter += 1
+            self.night_training_queue.append(exp)  # Queue for night
             
             # Prevent core knowledge from growing infinitely
             if len(self.core_knowledge) > 200:
@@ -586,51 +1071,30 @@ class MemoryManagement:
         self.core_knowledge.sort(key=lambda x: x.composite_score())
         self.core_knowledge = self.core_knowledge[-200:]  # Keep top 200
         
-    def get_retraining_dataset(self):
-        """What to actually retrain on"""
-        return {
-            'core': self.core_knowledge,           # ~50-200 significant
-            'recent': self.recent_buffer[-20:]     # ~20 for context
+    def get_night_training_data(self):
+        """What to train on tonight (called at night phase)"""
+        data = {
+            'new_experiences': self.night_training_queue,
+            'core_context': self.core_knowledge[-50:],  # Recent core for context
         }
-        # Total: ~70-220 experiences regardless of simulation length
+        # Clear queue after collecting
+        self.night_training_queue = []
+        return data
 ```
 
-### Retraining Frequency
-
-```python
-def should_retrain(self):
-    """Decide when to trigger retraining"""
-    
-    # Strategy 1: After N significant experiences
-    if self.retrain_counter >= 5:
-        return True
-        
-    # Strategy 2: After major discovery
-    if self.last_experience.significance > 150:
-        return True
-        
-    # Strategy 3: Periodic (every 50 sim-days)
-    if self.sim_days_since_retrain >= 50:
-        return True
-        
-    return False
-```
-
-### Training Time Estimates
+### Training Time Estimates (with LoRA)
 
 ```
-Dataset Size → Training Time (on high-end GPU)
+LoRA Adapter Training (vs Full Model):
 -------------------------------------------
-50 experiences  → 3-5 minutes
-100 experiences → 7-10 minutes
-200 experiences → 15-20 minutes
-500 experiences → 40-60 minutes
+Full Model (1B params)  → 15-20 minutes
+LoRA Adapter (~10MB)    → 2-5 minutes  ⚡ 5x faster!
 
-With selective filtering:
-- Average: ~80 experiences per retrain
-- Training time: ~8 minutes per retrain
-- Frequency: Every 5 significant discoveries
-- Total over 1000 sim-days: ~15 retraining sessions = 2 hours total
+With selective filtering + LoRA:
+- Average: ~80 experiences per night
+- Training time: ~3 minutes per adapter
+- Multiple adapters in parallel: ~5-10 min total per night
+- Total over 1000 sim-days: ~10 nights of training = ~2 hours total
 ```
 
 ---
@@ -638,6 +1102,11 @@ With selective filtering:
 ## 🔬 What Will Emerge?
 
 ### Phase 1: Basic Survival (Days 1-50)
+
+**System State:**
+- 🦎 Lizard Brain handles 90% of decisions
+- 🧠 LLM activates for novel objects only
+- LoRA adapters: mostly empty
 
 **Expected Discoveries:**
 - Resource locations and properties
@@ -653,6 +1122,11 @@ With selective filtering:
 
 ### Phase 2: First Contact (Days 50-200)
 
+**System State:**
+- 🦎 Lizard Brain: 70% of decisions
+- 🧠 LLM: activates when other agent visible
+- Social Adapter begins accumulating data
+
 **Expected Discoveries:**
 - Other agent is similar to self
 - Signals can attract or repel
@@ -667,6 +1141,11 @@ With selective filtering:
 
 ### Phase 3: Proto-Cooperation (Days 200-500)
 
+**System State:**
+- 🦎 Lizard Brain: 50% (routine tasks)
+- 🧠 LLM: 50% (social situations, planning)
+- Social + Communication Adapters well-trained
+
 **Expected Discoveries:**
 - Resource sharing increases survival
 - Reciprocity patterns
@@ -680,6 +1159,11 @@ With selective filtering:
 - Basic trust building
 
 ### Phase 4: Social Structures (Days 500-1000)
+
+**System State:**
+- Dynamic switching between 🦎 and 🧠
+- All adapters mature and specialized
+- Complex context-switching
 
 **Expected Discoveries:**
 - Fairness norms (equal exchange)
@@ -711,7 +1195,7 @@ Or something completely alien?
 
 ### Phase 1: Foundation (Weeks 1-4)
 
-**Goal:** Build minimal base model
+**Goal:** Build minimal base model + Lizard Brain
 
 **Tasks:**
 1. Curate filtered training dataset
@@ -726,6 +1210,11 @@ Or something completely alien?
    - Train for 1-2 weeks on high-end GPU
    - Validate: Test for knowledge leakage
 
+3. **NEW: Implement Lizard Brain**
+   - Hardcode survival instincts in Python
+   - Test: Agent survives without LLM
+   - Validate: Never freezes, always has action
+
 **Validation Tests:**
 ```
 Q: "What is democracy?" 
@@ -736,86 +1225,105 @@ Expected: "I don't know about human organization."
 
 Q: "What causes fire?"
 Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
+
+TEST: Agent with LLM disabled survives 50 days on Lizard Brain alone ✓
 ```
 
 **Hardware:** Brother's PC with good GPU
 
-**Deliverable:** Trained 500M-1B model with minimal cultural knowledge
+**Deliverable:** Trained 500M-1B model + functional Lizard Brain
 
 ### Phase 2: Simulation Engine (Weeks 5-8)
 
-**Goal:** Build world and agent systems
+**Goal:** Build world and dual-process agent systems
 
 **Tasks:**
 1. Implement World class
    ```python
    - 50x50 grid environment
    - Resource spawning (food, water)
-   - Day/night cycles
+   - Day/night cycles (with training phases)
    - Weather system (optional for v1)
    - Collision detection
    ```
 
-2. Implement Agent class
+2. **NEW: Implement Day/Night Cycle Manager**
    ```python
-   - Observation processing
-   - LLM integration for decision-making
-   - Action execution
-   - Memory system
+   - Day phase: inference only
+   - Night phase: training
+   - Hot-swap mechanism
    ```
 
-3. Build visualization
+3. Implement Dual-Process Agent class
+   ```python
+   - Lizard Brain integration
+   - LLM activation triggers
+   - Mode visualization (🟢/🔵)
+   ```
+
+4. Build visualization
    ```python
    - pygame for 2D rendering
    - Real-time or accelerated time
    - Debug view showing agent thoughts
+   - MODE INDICATORS (🟢 green / 🔵 blue lights)
    ```
 
 **Validation Tests:**
 - Single agent can survive 100 sim-days
-- Agent finds and consumes resources
-- Agent avoids hazards
-- Basic reasoning visible in debug logs
+- Lizard Brain handles 80%+ of routine decisions
+- LLM only activates for novel situations
+- Day/night cycle runs without crashes
 
 **Hardware:** Development on MacBook M4, testing on both machines
 
-**Deliverable:** Working simulation with 1 functional agent
+**Deliverable:** Working simulation with 1 dual-process agent
 
-### Phase 3: Communication & Learning (Weeks 9-12)
+### Phase 3: LoRA + Communication (Weeks 9-12)
 
-**Goal:** Add second agent and learning systems
+**Goal:** Add LoRA system, second agent, and learning
 
 **Tasks:**
-1. Implement Communication module
+1. **NEW: Implement LoRA Adapter Manager**
+   ```python
+   - Base model freezing
+   - Adapter initialization (survival, social, discovery, communication)
+   - Dynamic adapter selection
+   - Adapter merging for inference
+   ```
+
+2. Implement Communication module
    ```python
    - Signal emission/reception
    - Meaning learning algorithm
    - Pattern recognition for signals
    ```
 
-2. Build Experience tracking
+3. Build Experience tracking
    ```python
    - Experience recording
    - Significance evaluation
-   - Memory management (core + buffer)
+   - Categorization for adapters
+   - Night training queue
    ```
 
-3. Implement Incremental retraining
+4. **NEW: Implement Asynchronous Night Training**
    ```python
-   - Experience → training data formatting
-   - Retraining triggers
-   - Model update pipeline
+   - Background training thread
+   - Adapter-specific training
+   - Hot-swap mechanism
    ```
 
 **Validation Tests:**
 - Two agents can perceive each other
 - Signals are emitted and received
-- Experiences are logged correctly
-- Retraining completes in < 10 minutes
+- Experiences categorized correctly by adapter
+- Night training completes in < 5 minutes per adapter
+- Hot-swap works without crashes
 
-**Hardware:** Brother's PC for retraining, M4 for simulation
+**Hardware:** Brother's PC for training, M4 for simulation
 
-**Deliverable:** Two-agent system with learning capability
+**Deliverable:** Two-agent system with LoRA learning
 
 ### Phase 4: Short Experiments (Weeks 13-16)
 
@@ -832,18 +1340,22 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
    - Interaction frequency
    - Signal usage patterns
    - Cooperation events
+   - **NEW: System 1 vs System 2 usage ratio**
+   - **NEW: Adapter activation patterns**
    
 3. Analyze and iterate
    - Fix bugs
    - Tune parameters
    - Improve significance filtering
-   - Optimize retraining
+   - Balance Lizard Brain vs LLM activation
 
 **Success Criteria:**
 - Agents survive > 50 days
 - At least 3 significant discoveries per agent
 - Observable interaction patterns
-- Retraining happens 3-5 times per 100 days
+- Night training happens smoothly
+- **NEW: Lizard Brain handles 60-80% of decisions**
+- **NEW: No catastrophic forgetting observed**
 
 **Deliverable:** Stable system ready for long-term experiments
 
@@ -862,6 +1374,8 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
    - Identify social patterns
    - Map language development
    - Track belief evolution
+   - **NEW: Analyze adapter specialization over time**
+   - **NEW: Track System 1/2 balance evolution**
    
 3. Iteration and scaling
    - Add complexity if successful
@@ -873,6 +1387,8 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - What communication patterns develop?
 - Are there human-like social structures?
 - Or completely alien solutions?
+- **NEW: How do the adapters specialize?**
+- **NEW: Does the System 1/2 balance change over time?**
 
 **Deliverable:** Research findings, documented behaviors, recorded simulations
 
@@ -882,8 +1398,9 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 
 ### Level 1: Basic Functionality (Minimum Viable)
 - ✅ Agents survive 100+ days
-- ✅ Retraining happens successfully
-- ✅ Knowledge accumulates without errors
+- ✅ Day/night cycle runs smoothly
+- ✅ LoRA training completes without errors
+- ✅ Lizard Brain prevents agent freezing
 - ✅ System runs without crashes
 
 ### Level 2: Learning Observed (Good Progress)
@@ -891,18 +1408,21 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - ✅ Repeated patterns show learning
 - ✅ Agents avoid previously harmful actions
 - ✅ Consistent behaviors emerge
+- ✅ Adapters show specialization
 
 ### Level 3: Communication Develops (Significant Achievement)
 - ✅ Signals gain consistent meanings
 - ✅ Agents respond appropriately to signals
 - ✅ Communication increases over time
 - ✅ Proto-language observable
+- ✅ Communication Adapter shows clear learning
 
 ### Level 4: Cooperation Emerges (Major Success)
 - ✅ Resource sharing occurs
 - ✅ Reciprocity patterns develop
 - ✅ Agents coordinate actions
 - ✅ Mutual benefit demonstrated
+- ✅ Social Adapter significantly different from Survival Adapter
 
 ### Level 5: Social Structures (Groundbreaking)
 - ✅ Trade patterns established
@@ -929,21 +1449,31 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - Add environmental threats requiring cooperation
 - Reduce individual carrying capacity
 
-### Failure 2: Retraining Breaks Learning
-**Symptom:** After retraining, agents behave worse or forget things
+### Failure 2: ~~Retraining Breaks Learning~~ SOLVED ✅
+**Original Problem:** Catastrophic forgetting during full model retraining
 
-**Causes:**
-- Catastrophic forgetting
-- Poor experience formatting
-- Training hyperparameters too aggressive
+**Solution Implemented:** 
+- LoRA Adapters (base model frozen)
+- Asynchronous night training
+- Adapter specialization
 
-**Solutions:**
-- Always include core knowledge in retraining
-- Use very small learning rates (1e-5)
-- Fewer epochs per retrain (2-3 max)
-- Validate model after each retrain
+### Failure 3: ~~Agents Freeze/Become Catatonic~~ SOLVED ✅
+**Original Problem:** Blank-slate model doesn't know how to act
 
-### Failure 3: Agents Learn Wrong Patterns
+**Solution Implemented:**
+- Lizard Brain (System 1) always running
+- LLM (System 2) only activates when needed
+- Hardcoded survival instincts guarantee action
+
+### Failure 4: ~~Training Latency Kills Immersion~~ SOLVED ✅
+**Original Problem:** Stopping simulation for 10+ minute retraining sessions
+
+**Solution Implemented:**
+- Day/Night cycle
+- Training during "sleep"
+- Hot-swap of adapters at "morning"
+
+### Failure 5: Agents Learn Wrong Patterns
 **Symptom:** Agents develop incorrect beliefs, don't correct them
 
 **Causes:**
@@ -957,7 +1487,7 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - Weight recent experiences more heavily
 - Allow overwriting of old beliefs
 
-### Failure 4: Communication Doesn't Emerge
+### Failure 6: Communication Doesn't Emerge
 **Symptom:** Signals remain random, no consistent meanings
 
 **Causes:**
@@ -971,7 +1501,7 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - Make some resources only accessible via cooperation
 - Add shared threats requiring coordination
 
-### Failure 5: Model Too Small/Dumb
+### Failure 7: Model Too Small/Dumb
 **Symptom:** Agents can't reason about complex scenarios
 
 **Causes:**
@@ -984,20 +1514,21 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - Enrich training data with more examples
 - Implement better memory retrieval
 - Consider hybrid reasoning system
+- **NEW: Larger LoRA rank for more expressiveness**
 
-### Failure 6: Exponential Data Growth
-**Symptom:** Retraining takes hours, system slows down
+### Failure 8: Adapter Confusion
+**Symptom:** Wrong adapter activated for situation
 
 **Causes:**
-- Significance filter too permissive
-- Not pruning old memories
-- Including too much in retraining
+- Poor context detection
+- Overlapping adapter domains
+- Unclear categorization rules
 
 **Solutions:**
-- Increase significance threshold
-- Implement aggressive pruning (keep top 200)
-- Only retrain on core + recent (not everything)
-- Optimize training code
+- Improve context detection heuristics
+- Clear adapter boundaries
+- Allow adapter combinations
+- Add "general" fallback adapter
 
 ---
 
@@ -1022,6 +1553,7 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - Python 3.10+
 - PyTorch 2.0+ (for model training/inference)
 - Transformers library (Hugging Face)
+- **NEW: PEFT library (for LoRA)**
 
 **For MacBook M4:**
 - MLX (Apple's ML framework - optimized for Apple Silicon)
@@ -1031,10 +1563,12 @@ Expected: "Rapid oxidation reaction, requires fuel, heat, and oxygen." ✓
 - NumPy (world state management)
 - Pygame (visualization)
 - Custom simulation engine
+- **NEW: Threading (for async night training)**
 
 **Training:**
 - Accelerate (distributed training)
 - bitsandbytes (quantization)
+- **NEW: PEFT (Parameter-Efficient Fine-Tuning)**
 - wandb (experiment tracking - optional)
 
 **Development:**
@@ -1051,6 +1585,16 @@ Size: 500M - 1B parameters
 Context Length: 2048-4096 tokens
 Vocabulary: 32k tokens
 Training: Continual pre-training on filtered dataset
+Status: FROZEN after initial training
+```
+
+**LoRA Adapters:**
+```
+Rank: 8-16 (tunable)
+Alpha: 16-32
+Target Modules: q_proj, v_proj, k_proj, o_proj
+Adapter Size: ~10MB each
+Training Time: 2-5 minutes per adapter
 ```
 
 **Inference:**
@@ -1059,6 +1603,7 @@ Quantization: 4-bit or 8-bit (for speed)
 Batch Size: 1 (sequential agent decisions)
 Context: Recent experiences + core knowledge
 Generation: ~50-200 tokens per decision
+Adapter Merging: Dynamic based on context
 ```
 
 ---
@@ -1071,6 +1616,7 @@ Generation: ~50-200 tokens per decision
 ```python
 {
     'sim_day': 247,
+    'phase': 'day',  # or 'night'
     'timestamp': '2024-11-27T10:34:22',
     'agent_id': 'agent_A',
     'position': (23, 15),
@@ -1079,6 +1625,8 @@ Generation: ~50-200 tokens per decision
         'thirst': 30,
         'health': 85
     },
+    'system_mode': '🔵',  # NEW: 🟢 or 🔵
+    'active_adapters': ['social', 'communication'],  # NEW
     'observation': [...],
     'thought_process': "I observe food nearby and another agent...",
     'action': 'emit_signal_🔴',
@@ -1087,15 +1635,17 @@ Generation: ~50-200 tokens per decision
 }
 ```
 
-**After Each Retraining:**
+**After Each Night Training:**
 ```python
 {
-    'retrain_id': 7,
+    'night_id': 7,
     'sim_day': 248,
-    'trigger': 'cooperation_pattern_confirmed',
-    'experiences_trained': 73,
-    'training_time_seconds': 420,
-    'model_version': 'v1.7',
+    'adapters_trained': ['social', 'discovery'],  # NEW
+    'experiences_per_adapter': {
+        'social': 23,
+        'discovery': 8
+    },
+    'training_time_seconds': 180,  # Much faster with LoRA!
     'new_knowledge': [
         "Signal 🔴 reliably indicates food sharing opportunity",
         "Cooperation with agent_B increases survival by ~20%"
@@ -1113,14 +1663,18 @@ Generation: ~50-200 tokens per decision
             'interactions': 18,
             'signals_emitted': 42,
             'discoveries': 3,
-            'cooperation_events': 7
+            'cooperation_events': 7,
+            'system_1_usage': 0.72,  # NEW: 72% Lizard Brain
+            'system_2_usage': 0.28,  # NEW: 28% LLM
         },
         'agent_B': {
             'survival_rate': 0.92,
             'interactions': 18,
             'signals_emitted': 38,
             'discoveries': 2,
-            'cooperation_events': 7
+            'cooperation_events': 7,
+            'system_1_usage': 0.68,
+            'system_2_usage': 0.32,
         },
         'emergent_patterns': [
             "Reciprocal resource sharing established",
@@ -1134,16 +1688,21 @@ Generation: ~50-200 tokens per decision
 
 **Visualization:**
 - Replay simulation with agent thoughts visible
+- **NEW: Mode indicators (🟢/🔵) showing which system is active**
 - Plot survival rates over time
 - Graph interaction frequencies
 - Signal usage heatmaps
 - Knowledge accumulation curves
+- **NEW: Adapter activation patterns over time**
+- **NEW: System 1 vs System 2 usage trends**
 
 **Metrics:**
 - Cooperation coefficient (% of interactions that are cooperative)
 - Communication consistency (signal → response reliability)
 - Learning rate (new discoveries per 100 days)
 - Social complexity (unique interaction patterns)
+- **NEW: Adapter specialization index**
+- **NEW: System 1/2 balance ratio**
 
 ---
 
@@ -1157,6 +1716,8 @@ Generation: ~50-200 tokens per decision
 3. Reinforcement learning principles
 4. Continual learning systems
 5. Emergent behavior analysis
+6. **NEW: LoRA/PEFT techniques**
+7. **NEW: Dual-process cognitive architectures**
 
 ### If Basic Cooperation Emerges
 
@@ -1205,6 +1766,11 @@ Generation: ~50-200 tokens per decision
 - 10,000+ simulation days
 - Cultural evolution
 
+**Advanced Adapter System:**
+- More specialized adapters
+- Adapter inheritance between agents
+- Meta-learning adapters
+
 ---
 
 ## 🤔 Open Questions
@@ -1217,7 +1783,8 @@ Generation: ~50-200 tokens per decision
 **Technical:**
 - Can 1B models develop genuine creativity?
 - How much knowledge can be learned vs. must be pre-programmed?
-- What's the optimal retraining frequency?
+- What's the optimal LoRA rank for different adapter types?
+- How do System 1/2 ratios evolve over time?
 
 **Philosophical:**
 - What does this tell us about consciousness?
@@ -1233,6 +1800,8 @@ Generation: ~50-200 tokens per decision
 - Game theory and emergence of cooperation (Axelrod)
 - Multi-agent reinforcement learning literature
 - Continual learning in neural networks
+- **LoRA: Low-Rank Adaptation of Large Language Models (Hu et al., 2021)**
+- **Dual-process theory (Kahneman, System 1 and System 2)**
 
 **Differences from Existing Work:**
 - Stanford's Smallville uses GPT-4 (pre-loaded with human knowledge)
@@ -1243,6 +1812,9 @@ Generation: ~50-200 tokens per decision
 - True minimal knowledge starting point
 - Experience-based knowledge building
 - Tests genuine emergence vs. pattern matching
+- **NEW: LoRA adapters for catastrophic forgetting prevention**
+- **NEW: Dual-process architecture (Lizard Brain + LLM)**
+- **NEW: Biologically-inspired sleep learning**
 
 ---
 
@@ -1255,12 +1827,14 @@ Generation: ~50-200 tokens per decision
    git clone [your-repo]
    cd project-genesis
    pip install -r requirements.txt
+   pip install peft  # For LoRA
    ```
 
 2. **Run simple test simulation**
    ```bash
    python test_world.py
    # Should see: 50x50 grid, 2 agents, basic survival
+   # Watch for 🟢/🔵 mode indicators
    ```
 
 3. **Download/prepare base model**
@@ -1269,10 +1843,17 @@ Generation: ~50-200 tokens per decision
    # Will take 1-2 weeks to fully train
    ```
 
-4. **Run first experiment**
+4. **Test Lizard Brain independently**
+   ```bash
+   python test_lizard_brain.py --days 50
+   # Agent should survive on instincts alone
+   ```
+
+5. **Run first experiment**
    ```bash
    python run_simulation.py --days 100 --agents 2
    # Observe behaviors, check logs
+   # Watch day/night cycles
    ```
 
 ### Join the Project
@@ -1291,13 +1872,18 @@ Consider:
 ## ✅ Summary: The Path Forward
 
 **What You're Building:**
-Two AI agents with minimal starting knowledge, placed in a simulated Earth, who learn ONLY from experience through continuous model retraining.
+Two AI agents with minimal starting knowledge, placed in a simulated Earth, who learn ONLY from experience through continuous LoRA adapter training during "sleep" cycles, with dual-process architecture ensuring they never freeze.
+
+**Key Design Decisions:**
+1. **🌙 Sleep Learning:** Training happens at "night," no simulation interruption
+2. **🧬 LoRA Adapters:** Base model frozen, tiny adapters learn (no forgetting)
+3. **🦎 Lizard Brain:** Hardcoded instincts ensure agents always act
 
 **Why It's Hard:**
 Combines blank-slate learning, complex reasoning, and emergent social behavior - nobody has done this exact approach.
 
 **Why It's Feasible:**
-Small models (1B), selective retraining (only significant experiences), incremental learning (mimics humans), your available hardware.
+Small models (1B), LoRA adapters (fast training), Lizard Brain (guaranteed survival), selective retraining (only significant experiences), your available hardware.
 
 **Why It Matters:**
 Tests whether human civilization is inevitable or contingent. Could reveal universal principles of cooperation, or show us we could have done things completely differently.
@@ -1325,7 +1911,7 @@ And remember: the most interesting results are often the unexpected ones.
 ---
 
 **Project Status:** Concept & Design Phase  
-**Next Milestone:** Base model training  
+**Next Milestone:** Base model training + Lizard Brain implementation  
 **Timeline:** 6-9 months to first results  
 **Last Updated:** November 2024
 
